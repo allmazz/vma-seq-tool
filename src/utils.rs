@@ -1,6 +1,6 @@
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io;
 use std::io::Read;
-use indicatif::{ProgressBar, ProgressStyle};
 
 pub struct SequentialReader<'a, R> {
     source: &'a mut R,
@@ -25,9 +25,13 @@ impl<'a, R: Read> SequentialReader<'a, R> {
 
     pub fn read_exact(&mut self, size: usize) -> io::Result<Option<&mut [u8]>> {
         if size > self.buffer.len() {
-            return Err(io::Error::new(io::ErrorKind::Other, format!(
-                "Buffer is too small: tried to read {} bytes. Use the --sequential-buffer-size option to make it big enough.",
-                size)));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Buffer is too small: tried to read {} bytes. Use the --sequential-buffer-size option to make it big enough.",
+                    size
+                ),
+            ));
         }
 
         assert!(self.buffer_offset <= self.buffer_filled);
@@ -54,7 +58,7 @@ impl<'a, R: Read> SequentialReader<'a, R> {
                         self.buffer_filled += n;
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e)
+                    Err(e) => return Err(e),
                 }
             }
             if self.buffer_filled == 0 {
@@ -100,7 +104,9 @@ impl<'a, R: Read> SequentialReader<'a, R> {
     }
 
     pub fn source_position(&self) -> usize {
-        self.source_pos.checked_sub(self.buffer_filled - self.buffer_offset).unwrap()
+        self.source_pos
+            .checked_sub(self.buffer_filled - self.buffer_offset)
+            .unwrap()
     }
 
     pub fn empty(&self) -> bool {

@@ -1,14 +1,14 @@
-mod vma;
 mod utils;
+mod vma;
 
+use crate::utils::SequentialReader;
+use crate::vma::{EXTENT_MAX_SIZE, VMAIndex, write_sequential};
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
 use std::fs::File;
 use std::io;
 use std::io::{BufReader, BufWriter, Write};
+use std::path::PathBuf;
 use uuid::Uuid;
-use crate::utils::SequentialReader;
-use crate::vma::{VMAIndex, EXTENT_MAX_SIZE, write_sequential};
 
 #[derive(Args)]
 struct IOArgs {
@@ -25,7 +25,10 @@ impl IOArgs {
     pub fn check(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.input.as_os_str().is_empty(), "Input is not specified");
         anyhow::ensure!(!self.output.as_os_str().is_empty(), "Output is not specified");
-        anyhow::ensure!(self.output != self.input || self.is_stdout(), "Input can't be the same as output");
+        anyhow::ensure!(
+            self.output != self.input || self.is_stdout(),
+            "Input can't be the same as output"
+        );
         Ok(())
     }
 
@@ -86,7 +89,6 @@ struct CliArgs {
     command: Command,
 }
 
-
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = CliArgs::parse();
@@ -95,12 +97,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     match &args.command {
-        Command::Rebuild { io, rewrite_uuid, index_input } => {
+        Command::Rebuild {
+            io,
+            rewrite_uuid,
+            index_input,
+        } => {
             io.check()?;
-            anyhow::ensure!(!io.is_stdin(), "Input can't be stdin for rebuild because random I/O is necessary");
+            anyhow::ensure!(
+                !io.is_stdin(),
+                "Input can't be stdin for rebuild because random I/O is necessary"
+            );
             rebuild(&args, io, rewrite_uuid.as_ref(), index_input.as_ref())
         }
-        Command::Index { io} => {
+        Command::Index { io } => {
             io.check()?;
             let index = index(&args, &io)?;
             if io.is_stdout() {
@@ -118,8 +127,12 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-
-fn rebuild(args: &CliArgs, io: &IOArgs, rewrite_uuid: Option<&Uuid>, index_input: Option<&PathBuf>) -> anyhow::Result<()> {
+fn rebuild(
+    args: &CliArgs,
+    io: &IOArgs,
+    rewrite_uuid: Option<&Uuid>,
+    index_input: Option<&PathBuf>,
+) -> anyhow::Result<()> {
     let mut input = File::open(&io.input)?;
 
     let build_index = index_input.is_none();
@@ -134,7 +147,8 @@ fn rebuild(args: &CliArgs, io: &IOArgs, rewrite_uuid: Option<&Uuid>, index_input
         let index_input = index_input.unwrap();
         anyhow::ensure!(
             index_input != &io.input && (index_input != &io.output || io.is_stdout()),
-            "Index input can't be the same as input or output");
+            "Index input can't be the same as input or output"
+        );
         if index_input.as_os_str() == "-" {
             let mut w = BufReader::new(io::stdin().lock());
             idx.load_saved(&mut w)?

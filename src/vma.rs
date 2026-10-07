@@ -1,11 +1,11 @@
+use crate::utils::{SequentialReader, get_progress_bar};
+use bincode::{Decode, Encode, decode_from_std_read, encode_into_std_write};
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use chrono::DateTime;
+use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::os::unix::fs::FileExt;
-use std::fs::File;
 use uuid::Uuid;
-use byteorder::{BigEndian, LittleEndian, ByteOrder};
-use chrono::DateTime;
-use bincode::{decode_from_std_read, Decode, Encode, encode_into_std_write};
-use crate::utils::{get_progress_bar, SequentialReader};
 
 pub const INDEX_VERSION: u8 = 1;
 
@@ -27,7 +27,6 @@ pub const BLOCK_SIZE: usize = 4096;
 
 pub const HEADER_SIZE_LIMIT: usize = 1024 * 1024 * 1024; // 1 GiB
 pub const DEVICE_SIZE_LIMIT: usize = 10 * 1024 * 1024 * 1024 * 1024; // 10 TiB
-
 
 #[derive(Clone, Encode, Decode)]
 pub struct VMAIndexDevCluster {
@@ -71,7 +70,10 @@ impl Default for VMAIndex {
 
 impl VMAIndex {
     fn parse(&mut self, ignore_limits: bool) -> anyhow::Result<usize> {
-        anyhow::ensure!(self.bytes[0..4] == HEADER_MAGIC, "Invalid magic string. Is this a .vma file?");
+        anyhow::ensure!(
+            self.bytes[0..4] == HEADER_MAGIC,
+            "Invalid magic string. Is this a .vma file?"
+        );
         let version = BigEndian::read_u32(&self.bytes[4..8]);
         anyhow::ensure!(version == 1, "Unsupported version: {}", version);
 
@@ -79,28 +81,41 @@ impl VMAIndex {
         let blob_buffer_size = BigEndian::read_u32(&self.bytes[52..56]);
         let header_size = BigEndian::read_u32(&self.bytes[56..60]);
 
-        anyhow::ensure!(blob_buffer_offset % 512 == 0, "File is corrupted, blob_buffer_offset % 512 != 0");
+        anyhow::ensure!(
+            blob_buffer_offset % 512 == 0,
+            "File is corrupted, blob_buffer_offset % 512 != 0"
+        );
         anyhow::ensure!(header_size % 512 == 0, "File is corrupted, header_size % 512 != 0");
-        anyhow::ensure!(blob_buffer_offset + blob_buffer_size <= header_size, "File is corrupted, blob_buffer_offset + blob_buffer_size > header_size");
-        anyhow::ensure!(header_size >= HEADER_SIZE as u32, "File is corrupted, header declares an invalid size: {}", header_size);
+        anyhow::ensure!(
+            blob_buffer_offset + blob_buffer_size <= header_size,
+            "File is corrupted, blob_buffer_offset + blob_buffer_size > header_size"
+        );
+        anyhow::ensure!(
+            header_size >= HEADER_SIZE as u32,
+            "File is corrupted, header declares an invalid size: {}",
+            header_size
+        );
 
         anyhow::ensure!(
             (header_size as usize) <= HEADER_SIZE_LIMIT || ignore_limits,
-            "Header is too large: {}. Use --ignore-limits if you are sure that the file is not corrupted.", header_size);
+            "Header is too large: {}. Use --ignore-limits if you are sure that the file is not corrupted.",
+            header_size
+        );
         self.bytes.resize(header_size as usize, 0);
         Ok(blob_buffer_offset as usize)
     }
 
     fn parse_devs(&mut self, blob_buffer_offset: usize, ignore_limits: bool) -> anyhow::Result<()> {
         let ctime = BigEndian::read_u64(&self.bytes[24..32]);
-        log::info!("Dump {} created at {}",
+        log::info!(
+            "Dump {} created at {}",
             Uuid::from_bytes_ref((&self.bytes[8..24]).try_into()?),
-            DateTime::from_timestamp(ctime as i64, 0).unwrap());
+            DateTime::from_timestamp(ctime as i64, 0).unwrap()
+        );
 
         let blob = &self.bytes[blob_buffer_offset..];
-        let devsinfo = &self.bytes[
-            HEADER_DEV_INFO_OFFSET..
-            HEADER_DEV_INFO_OFFSET+HEADER_DEV_INFO_LEN*HEADER_DEV_INFO_SIZE];
+        let devsinfo =
+            &self.bytes[HEADER_DEV_INFO_OFFSET..HEADER_DEV_INFO_OFFSET + HEADER_DEV_INFO_LEN * HEADER_DEV_INFO_SIZE];
         for (i, devinfo) in devsinfo.chunks_exact(HEADER_DEV_INFO_SIZE).enumerate() {
             let mut dev = VMAIndexDevInfo {
                 name: "".to_string(),
@@ -112,18 +127,32 @@ impl VMAIndex {
             }
             anyhow::ensure!(
                 (dev.size as usize) <= DEVICE_SIZE_LIMIT || ignore_limits,
-                "Device is too large: {}. Use --ignore-limits if you are sure that the file is not corrupted.", dev.size);
+                "Device is too large: {}. Use --ignore-limits if you are sure that the file is not corrupted.",
+                dev.size
+            );
 
             let name_size_pos = BigEndian::read_u32(&devinfo[0..4]) as usize;
-            let name_pos_start = name_size_pos.checked_add(2).
-                ok_or_else(|| anyhow::anyhow!("Name size pos overflow: {}", name_size_pos))?;
-            anyhow::ensure!(name_pos_start <= blob.len(), "Dev {} name size pos {} is outside the blob", i, name_size_pos);
+            let name_pos_start = name_size_pos
+                .checked_add(2)
+                .ok_or_else(|| anyhow::anyhow!("Name size pos overflow: {}", name_size_pos))?;
+            anyhow::ensure!(
+                name_pos_start <= blob.len(),
+                "Dev {} name size pos {} is outside the blob",
+                i,
+                name_size_pos
+            );
 
             // The VMA source uses little-endian name lengths despite the specification's big-endian rule.
             let name_size = LittleEndian::read_u16(&blob[name_size_pos..name_pos_start]);
-            let name_pos_end = name_pos_start.checked_add(name_size as usize).
-                ok_or_else(|| anyhow::anyhow!("Name size overflow: {}, pos: {}", name_size, name_pos_start))?;
-            anyhow::ensure!(name_pos_end <= blob.len(), "Dev {} name pos is outside the blob: {}", i, name_pos_end);
+            let name_pos_end = name_pos_start
+                .checked_add(name_size as usize)
+                .ok_or_else(|| anyhow::anyhow!("Name size overflow: {}, pos: {}", name_size, name_pos_start))?;
+            anyhow::ensure!(
+                name_pos_end <= blob.len(),
+                "Dev {} name pos is outside the blob: {}",
+                i,
+                name_pos_end
+            );
 
             dev.name = String::from_utf8_lossy(&blob[name_pos_start..name_pos_end]).to_string();
 
@@ -136,37 +165,47 @@ impl VMAIndex {
 
     fn allocate_clusters(&mut self) {
         for dev in self.dev_info.iter_mut().flatten() {
-            dev.clusters.resize(dev.size.div_ceil(CLUSTER_SIZE as u64) as usize, VMAIndexDevCluster {
-                mask: 0,
-                first_block_offset: 0,
-            });
+            dev.clusters.resize(
+                dev.size.div_ceil(CLUSTER_SIZE as u64) as usize,
+                VMAIndexDevCluster {
+                    mask: 0,
+                    first_block_offset: 0,
+                },
+            );
         }
     }
 
     pub fn index_extent_header(&mut self, bytes: &mut [u8; EXTENT_HEADER_SIZE], pos: u64) -> anyhow::Result<u16> {
-        anyhow::ensure!(bytes[0..4] == EXTENT_HEADER_MAGIC,
-                "Invalid magic string for extent at {}",
-                pos);
+        anyhow::ensure!(
+            bytes[0..4] == EXTENT_HEADER_MAGIC,
+            "Invalid magic string for extent at {}",
+            pos
+        );
 
         let original_digest = md5::Digest(bytes[24..40].try_into()?);
         bytes[24..40].fill(0);
         let digest = md5::compute(&bytes);
         bytes[24..40].copy_from_slice(original_digest.as_ref());
-        anyhow::ensure!(original_digest == digest,
-                    "Header checksum mismatch for extent at {}: expected {:x}, got {:x}",
-                    pos, original_digest, digest);
+        anyhow::ensure!(
+            original_digest == digest,
+            "Header checksum mismatch for extent at {}: expected {:x}, got {:x}",
+            pos,
+            original_digest,
+            digest
+        );
 
-        anyhow::ensure!(bytes[8..24] == self.bytes[8..24],
-                "Extent at {} belongs to {}, not to the given file {}",
-                pos,
-                Uuid::from_bytes_ref((&bytes[8..24]).try_into()?),
-                Uuid::from_bytes_ref((&self.bytes[8..24]).try_into()?));
+        anyhow::ensure!(
+            bytes[8..24] == self.bytes[8..24],
+            "Extent at {} belongs to {}, not to the given file {}",
+            pos,
+            Uuid::from_bytes_ref((&bytes[8..24]).try_into()?),
+            Uuid::from_bytes_ref((&self.bytes[8..24]).try_into()?)
+        );
 
         let mut last_block_offset = pos + EXTENT_HEADER_SIZE as u64;
         let mut found_blocks = 0u16;
-        let blocksinfo = &bytes[
-            EXTENT_HEADER_BLOCKINFO_OFFSET..
-            EXTENT_HEADER_BLOCKINFO_OFFSET+EXTENT_HEADER_BLOCKINFO_LEN*EXTENT_HEADER_BLOCKINFO_SIZE];
+        let blocksinfo = &bytes[EXTENT_HEADER_BLOCKINFO_OFFSET
+            ..EXTENT_HEADER_BLOCKINFO_OFFSET + EXTENT_HEADER_BLOCKINFO_LEN * EXTENT_HEADER_BLOCKINFO_SIZE];
         for blockinfo in blocksinfo.chunks_exact(EXTENT_HEADER_BLOCKINFO_SIZE) {
             let dev_id = blockinfo[3];
             if dev_id == 0 {
@@ -175,16 +214,37 @@ impl VMAIndex {
 
             let cluster_num = BigEndian::read_u32(&blockinfo[4..8]);
             let Some(dev) = self.dev_info.get_mut(dev_id as usize) else {
-                anyhow::bail!("Cluster {} of extent at {} has out-of-range dev_id {}", cluster_num, pos, dev_id);
+                anyhow::bail!(
+                    "Cluster {} of extent at {} has out-of-range dev_id {}",
+                    cluster_num,
+                    pos,
+                    dev_id
+                );
             };
             let Some(dev) = dev else {
-                anyhow::bail!("Cluster {} of extent at {} belongs to an unknown dev_id {}", cluster_num, pos, dev_id);
+                anyhow::bail!(
+                    "Cluster {} of extent at {} belongs to an unknown dev_id {}",
+                    cluster_num,
+                    pos,
+                    dev_id
+                );
             };
 
             let Some(cluster) = dev.clusters.get_mut(cluster_num as usize) else {
-                anyhow::bail!("Unexpected cluster {} with dev_id {} found in extent at {}", cluster_num, dev_id, pos);
+                anyhow::bail!(
+                    "Unexpected cluster {} with dev_id {} found in extent at {}",
+                    cluster_num,
+                    dev_id,
+                    pos
+                );
             };
-            anyhow::ensure!(cluster.is_empty(), "Duplicate cluster {} with dev_id {} found in extent at {}", cluster_num, dev_id, pos);
+            anyhow::ensure!(
+                cluster.is_empty(),
+                "Duplicate cluster {} with dev_id {} found in extent at {}",
+                cluster_num,
+                dev_id,
+                pos
+            );
 
             let mask = BigEndian::read_u16(&blockinfo[0..2]);
             *cluster = VMAIndexDevCluster {
@@ -201,11 +261,18 @@ impl VMAIndex {
         anyhow::ensure!(
             found_blocks == expected_block_count,
             "{} non-empty blocks found in blockinfo but the header claims {}",
-            found_blocks, expected_block_count);
+            found_blocks,
+            expected_block_count
+        );
         Ok(found_blocks)
     }
 
-    pub fn from_file(file: &mut File, progress_bar: bool, build_index: bool, ignore_limits: bool) -> anyhow::Result<Self> {
+    pub fn from_file(
+        file: &mut File,
+        progress_bar: bool,
+        build_index: bool,
+        ignore_limits: bool,
+    ) -> anyhow::Result<Self> {
         let mut h = Self::default();
         file.read_exact(&mut h.bytes)?;
         let blob_buffer_offset = h.parse(ignore_limits)?;
@@ -240,7 +307,12 @@ impl VMAIndex {
         Ok(h)
     }
 
-    pub fn from_sequential<R: Read> (reader: &mut SequentialReader<R>, progress_bar: bool, build_index: bool, ignore_limits: bool) -> anyhow::Result<Self> {
+    pub fn from_sequential<R: Read>(
+        reader: &mut SequentialReader<R>,
+        progress_bar: bool,
+        build_index: bool,
+        ignore_limits: bool,
+    ) -> anyhow::Result<Self> {
         let mut h = Self {
             bytes: Vec::from(reader.read_exact(HEADER_SIZE)?.expect("Input is too short")),
             ..Default::default()
@@ -283,9 +355,12 @@ impl VMAIndex {
         let digest = md5::compute(&self.bytes);
         self.bytes[32..48].copy_from_slice(original_digest.as_ref());
 
-        anyhow::ensure!(original_digest == digest,
-                    "Header checksum mismatch: expected {:x}, got {:x}",
-                    original_digest, digest);
+        anyhow::ensure!(
+            original_digest == digest,
+            "Header checksum mismatch: expected {:x}, got {:x}",
+            original_digest,
+            digest
+        );
         Ok(())
     }
 
@@ -301,10 +376,16 @@ impl VMAIndex {
 
     pub fn load_saved<R: Read>(&mut self, r: &mut R) -> anyhow::Result<()> {
         let saved: VMASavedIndex = decode_from_std_read(r, bincode::config::standard())?;
-        anyhow::ensure!(saved.version == INDEX_VERSION,
+        anyhow::ensure!(
+            saved.version == INDEX_VERSION,
             "Unsupported index version {}. Supported index versions: {}",
-            saved.version, INDEX_VERSION);
-        anyhow::ensure!(self.bytes == saved.bytes, "Index is corrupted or belongs to a different file");
+            saved.version,
+            INDEX_VERSION
+        );
+        anyhow::ensure!(
+            self.bytes == saved.bytes,
+            "Index is corrupted or belongs to a different file"
+        );
         self.dev_info = saved.dev_info;
         self.verify_clusters()
     }
@@ -320,7 +401,7 @@ impl VMAIndex {
     }
 }
 
-pub fn write_sequential<W: Write> (
+pub fn write_sequential<W: Write>(
     input: &mut File,
     output: &mut W,
     index: &mut VMAIndex,
@@ -328,11 +409,7 @@ pub fn write_sequential<W: Write> (
     progress_bar: bool,
 ) -> anyhow::Result<()> {
     log::info!("Rebuilding in sequential order...");
-    let progress_bar = get_progress_bar(index.dev_info.
-        iter().
-        flatten().
-        map(|d| d.size).
-        sum(), progress_bar)?;
+    let progress_bar = get_progress_bar(index.dev_info.iter().flatten().map(|d| d.size).sum(), progress_bar)?;
 
     if let Some(rewrite_uuid) = rewrite_uuid {
         index.bytes[8..24].copy_from_slice(rewrite_uuid.as_bytes());
@@ -349,16 +426,19 @@ pub fn write_sequential<W: Write> (
     for (dev_id, dev) in index.dev_info.iter().enumerate() {
         let Some(dev) = dev else { continue };
         let clusters = &dev.clusters;
-        if clusters.is_empty() { continue }
+        if clusters.is_empty() {
+            continue;
+        }
 
-        log::info!("Processing {}, will write {} extents...", dev.name, clusters.len().div_ceil(EXTENT_HEADER_BLOCKINFO_LEN));
+        log::info!(
+            "Processing {}, will write {} extents...",
+            dev.name,
+            clusters.len().div_ceil(EXTENT_HEADER_BLOCKINFO_LEN)
+        );
 
         for start in (0..clusters.len()).step_by(EXTENT_HEADER_BLOCKINFO_LEN) {
             let end = (start + EXTENT_HEADER_BLOCKINFO_LEN).min(clusters.len());
-            let non_empty_blocks: u16 = clusters[start..end].
-                iter().
-                map(|c| c.mask.count_ones() as u16).
-                sum();
+            let non_empty_blocks: u16 = clusters[start..end].iter().map(|c| c.mask.count_ones() as u16).sum();
 
             let mut w = &mut extent_buffer[..EXTENT_HEADER_SIZE];
             w.write_all(&EXTENT_HEADER_MAGIC)?;
@@ -386,7 +466,7 @@ pub fn write_sequential<W: Write> (
                 }
 
                 let cluster_size = cluster_blocks as usize * BLOCK_SIZE;
-                let cluster_buffer = &mut extent_buffer[offset..offset+cluster_size];
+                let cluster_buffer = &mut extent_buffer[offset..offset + cluster_size];
                 // todo: optimization: we can join reads when blocks are contiguous to reduce the number of syscalls.
                 input.read_exact_at(cluster_buffer, c.first_block_offset)?;
                 offset += cluster_size;
@@ -394,7 +474,7 @@ pub fn write_sequential<W: Write> (
 
             assert_eq!(offset, EXTENT_HEADER_SIZE + non_empty_blocks as usize * BLOCK_SIZE);
             output.write_all(&extent_buffer[..offset])?;
-            progress_bar.inc((end-start) as u64 * CLUSTER_SIZE as u64);
+            progress_bar.inc((end - start) as u64 * CLUSTER_SIZE as u64);
         }
     }
 
