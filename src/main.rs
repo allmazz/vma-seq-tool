@@ -137,8 +137,9 @@ fn rebuild(
 
     let build_index = index_input.is_none();
     let mut idx = if args.sequential_scan {
-        let mut r = SequentialReader::new(&mut input, args.sequential_buffer_size)?;
-        VMAIndex::from_sequential(&mut r, args.progress_bar, build_index, args.ignore_limits)?
+        let file_size = input.metadata()?.len();
+        let mut r = SequentialReader::new(&mut input, args.sequential_buffer_size);
+        VMAIndex::from_sequential(&mut r, args.progress_bar, file_size, build_index, args.ignore_limits)?
     } else {
         VMAIndex::from_file(&mut input, args.progress_bar, build_index, args.ignore_limits)?
     };
@@ -174,14 +175,15 @@ fn rebuild(
 fn index(args: &CliArgs, io: &IOArgs) -> anyhow::Result<VMAIndex> {
     if io.is_stdin() {
         let mut stdin = io::stdin().lock();
-        let mut r = SequentialReader::new(&mut stdin, args.sequential_buffer_size)?;
-        return VMAIndex::from_sequential(&mut r, args.progress_bar, true, args.ignore_limits);
+        let mut r = SequentialReader::new(&mut stdin, args.sequential_buffer_size);
+        return VMAIndex::from_sequential(&mut r, args.progress_bar, 0, true, args.ignore_limits);
     }
 
     let mut input = File::open(&io.input)?;
     if args.sequential_scan {
-        let mut r = SequentialReader::new(&mut input, args.sequential_buffer_size)?;
-        return VMAIndex::from_sequential(&mut r, args.progress_bar, true, args.ignore_limits);
+        let file_size = input.metadata()?.len();
+        let mut r = SequentialReader::new(&mut input, args.sequential_buffer_size);
+        return VMAIndex::from_sequential(&mut r, args.progress_bar, file_size, true, args.ignore_limits);
     }
     VMAIndex::from_file(&mut input, args.progress_bar, true, args.ignore_limits)
 }

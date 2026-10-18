@@ -7,7 +7,7 @@ use std::io::{Read, Seek, Write};
 use std::os::unix::fs::FileExt;
 use uuid::Uuid;
 
-pub const INDEX_VERSION: u8 = 1;
+pub const INDEX_VERSION: u8 = 2;
 
 pub const HEADER_MAGIC: [u8; 4] = *b"VMA\0";
 pub const HEADER_SIZE: usize = 12288;
@@ -45,6 +45,7 @@ pub struct VMAIndexDevInfo {
     pub name: String,
     pub size: u64,
     pub clusters: Vec<VMAIndexDevCluster>,
+    pub stored_blocks: u64,
 }
 
 pub struct VMAIndex {
@@ -121,6 +122,7 @@ impl VMAIndex {
                 name: "".to_string(),
                 size: BigEndian::read_u64(&devinfo[8..16]),
                 clusters: vec![],
+                stored_blocks: 0,
             };
             if dev.size == 0 {
                 continue;
@@ -175,11 +177,11 @@ impl VMAIndex {
         }
     }
 
-    pub fn index_extent_header(&mut self, bytes: &mut [u8; EXTENT_HEADER_SIZE], pos: u64) -> anyhow::Result<u16> {
+    pub fn index_extent_header(&mut self, bytes: &mut [u8; EXTENT_HEADER_SIZE], data_pos: u64) -> anyhow::Result<u64> {
         anyhow::ensure!(
             bytes[0..4] == EXTENT_HEADER_MAGIC,
             "Invalid magic string for extent at {}",
-            pos
+            data_pos
         );
 
         let original_digest = md5::Digest(bytes[24..40].try_into()?);
@@ -189,7 +191,7 @@ impl VMAIndex {
         anyhow::ensure!(
             original_digest == digest,
             "Header checksum mismatch for extent at {}: expected {:x}, got {:x}",
-            pos,
+            data_pos,
             original_digest,
             digest
         );
@@ -197,13 +199,14 @@ impl VMAIndex {
         anyhow::ensure!(
             bytes[8..24] == self.bytes[8..24],
             "Extent at {} belongs to {}, not to the given file {}",
-            pos,
+            data_pos,
             Uuid::from_bytes_ref((&bytes[8..24]).try_into()?),
             Uuid::from_bytes_ref((&self.bytes[8..24]).try_into()?)
         );
 
-        let mut last_block_offset = pos + EXTENT_HEADER_SIZE as u64;
+        let mut last_block_offset = data_pos;
         let mut found_blocks = 0u16;
+
         let blocksinfo = &bytes[EXTENT_HEADER_BLOCKINFO_OFFSET
             ..EXTENT_HEADER_BLOCKINFO_OFFSET + EXTENT_HEADER_BLOCKINFO_LEN * EXTENT_HEADER_BLOCKINFO_SIZE];
         for blockinfo in blocksinfo.chunks_exact(EXTENT_HEADER_BLOCKINFO_SIZE) {
@@ -217,7 +220,7 @@ impl VMAIndex {
                 anyhow::bail!(
                     "Cluster {} of extent at {} has out-of-range dev_id {}",
                     cluster_num,
-                    pos,
+                    data_pos,
                     dev_id
                 );
             };
@@ -225,7 +228,7 @@ impl VMAIndex {
                 anyhow::bail!(
                     "Cluster {} of extent at {} belongs to an unknown dev_id {}",
                     cluster_num,
-                    pos,
+                    data_pos,
                     dev_id
                 );
             };
@@ -235,7 +238,7 @@ impl VMAIndex {
                     "Unexpected cluster {} with dev_id {} found in extent at {}",
                     cluster_num,
                     dev_id,
-                    pos
+                    data_pos
                 );
             };
             anyhow::ensure!(
@@ -243,7 +246,7 @@ impl VMAIndex {
                 "Duplicate cluster {} with dev_id {} found in extent at {}",
                 cluster_num,
                 dev_id,
-                pos
+                data_pos
             );
 
             let mask = BigEndian::read_u16(&blockinfo[0..2]);
@@ -252,19 +255,21 @@ impl VMAIndex {
                 first_block_offset: last_block_offset,
             };
 
-            let non_empty_blocks = mask.count_ones() as u16;
-            found_blocks += non_empty_blocks;
-            last_block_offset += BLOCK_SIZE as u64 * non_empty_blocks as u64;
+            let stored_blocks = mask.count_ones() as u16;
+            dev.stored_blocks += stored_blocks as u64;
+            found_blocks += stored_blocks;
+            last_block_offset += BLOCK_SIZE as u64 * stored_blocks as u64;
         }
 
         let expected_block_count = BigEndian::read_u16(&bytes[6..8]);
         anyhow::ensure!(
             found_blocks == expected_block_count,
-            "{} non-empty blocks found in blockinfo but the header claims {}",
+            "{} non-empty blocks found in blockinfo but the extent header at {} claims {}",
             found_blocks,
+            data_pos,
             expected_block_count
         );
-        Ok(found_blocks)
+        Ok(last_block_offset - data_pos)
     }
 
     pub fn from_file(
@@ -287,20 +292,18 @@ impl VMAIndex {
         log::info!("Building index...");
         h.allocate_clusters();
         let file_size = file.metadata()?.len();
-        let mut file_pos = h.bytes.len() as u64;
         let progress_bar = get_progress_bar(file_size, progress_bar)?;
 
         let mut extent_header_bytes = [0u8; EXTENT_HEADER_SIZE];
+        let mut file_pos = h.bytes.len() as u64;
         while file_pos != file_size {
             file.read_exact(&mut extent_header_bytes)?;
-            let block_count = Self::index_extent_header(&mut h, &mut extent_header_bytes, file_pos)?;
+            file_pos += EXTENT_HEADER_SIZE as u64;
+            let to_skip = h.index_extent_header(&mut extent_header_bytes, file_pos)?;
 
-            let to_skip = block_count as u64 * BLOCK_SIZE as u64;
             file.seek_relative(to_skip as i64)?;
-
-            let d = to_skip + EXTENT_HEADER_SIZE as u64;
-            file_pos += d;
-            progress_bar.inc(d);
+            file_pos += to_skip;
+            progress_bar.set_position(file_pos);
         }
 
         h.verify_clusters()?;
@@ -310,6 +313,7 @@ impl VMAIndex {
     pub fn from_sequential<R: Read>(
         reader: &mut SequentialReader<R>,
         progress_bar: bool,
+        source_size: u64,
         build_index: bool,
         ignore_limits: bool,
     ) -> anyhow::Result<Self> {
@@ -330,19 +334,19 @@ impl VMAIndex {
         }
         log::info!("Building index (sequential scan)...");
         h.allocate_clusters();
-        let progress_bar = get_progress_bar(0, progress_bar)?;
+        let progress_bar = get_progress_bar(source_size, progress_bar)?;
 
+        let mut source_pos = h.bytes.len() as u64;
         while !reader.empty() {
-            let extent_pos = reader.source_position() as u64;
             let Some(extent_header_bytes) = reader.read_exact(EXTENT_HEADER_SIZE)? else {
                 break;
             };
+            source_pos += EXTENT_HEADER_SIZE as u64;
+            let to_skip = h.index_extent_header(extent_header_bytes.try_into()?, source_pos)?;
 
-            let block_count = Self::index_extent_header(&mut h, extent_header_bytes.try_into()?, extent_pos)?;
-
-            let to_skip = block_count as usize * BLOCK_SIZE;
-            reader.discard(to_skip)?;
-            progress_bar.inc((EXTENT_HEADER_SIZE + to_skip) as u64);
+            reader.discard(to_skip as usize)?;
+            source_pos += to_skip;
+            progress_bar.set_position(source_pos);
         }
 
         h.verify_clusters()?;
@@ -372,6 +376,16 @@ impl VMAIndex {
             }
         }
         Ok(())
+    }
+
+    pub fn rebuilt_size(&self) -> u64 {
+        let mut total_size = self.bytes.len() as u64;
+        for dev in self.dev_info.iter().flatten() {
+            let extents = dev.clusters.len().div_ceil(EXTENT_HEADER_BLOCKINFO_LEN);
+            total_size += extents as u64 * EXTENT_HEADER_SIZE as u64;
+            total_size += dev.stored_blocks * BLOCK_SIZE as u64;
+        }
+        total_size
     }
 
     pub fn load_saved<R: Read>(&mut self, r: &mut R) -> anyhow::Result<()> {
@@ -409,7 +423,9 @@ pub fn write_sequential<W: Write>(
     progress_bar: bool,
 ) -> anyhow::Result<()> {
     log::info!("Rebuilding in sequential order...");
-    let progress_bar = get_progress_bar(index.dev_info.iter().flatten().map(|d| d.size).sum(), progress_bar)?;
+    let mut bytes_written = 0u64;
+    let new_size = index.rebuilt_size();
+    let progress_bar = get_progress_bar(new_size as u64, progress_bar)?;
 
     if let Some(rewrite_uuid) = rewrite_uuid {
         index.bytes[8..24].copy_from_slice(rewrite_uuid.as_bytes());
@@ -421,6 +437,7 @@ pub fn write_sequential<W: Write>(
         log::info!("Rewrote UUID to {}, new digest is {:x}", rewrite_uuid, digest);
     }
     output.write_all(&index.bytes)?;
+    bytes_written += index.bytes.len() as u64;
 
     let mut extent_buffer = vec![0u8; EXTENT_MAX_SIZE];
     for (dev_id, dev) in index.dev_info.iter().enumerate() {
@@ -429,12 +446,6 @@ pub fn write_sequential<W: Write>(
         if clusters.is_empty() {
             continue;
         }
-
-        log::info!(
-            "Processing {}, will write {} extents...",
-            dev.name,
-            clusters.len().div_ceil(EXTENT_HEADER_BLOCKINFO_LEN)
-        );
 
         for start in (0..clusters.len()).step_by(EXTENT_HEADER_BLOCKINFO_LEN) {
             let end = (start + EXTENT_HEADER_BLOCKINFO_LEN).min(clusters.len());
@@ -474,9 +485,16 @@ pub fn write_sequential<W: Write>(
 
             assert_eq!(offset, EXTENT_HEADER_SIZE + non_empty_blocks as usize * BLOCK_SIZE);
             output.write_all(&extent_buffer[..offset])?;
-            progress_bar.inc((end - start) as u64 * CLUSTER_SIZE as u64);
+            bytes_written += offset as u64;
+            progress_bar.set_position(bytes_written);
         }
     }
 
+    anyhow::ensure!(
+        bytes_written == new_size,
+        "Expected to write {}, but did {}. This is a bug or index is corrupted",
+        new_size,
+        bytes_written
+    );
     Ok(())
 }

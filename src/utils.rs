@@ -4,7 +4,6 @@ use std::io::Read;
 
 pub struct SequentialReader<'a, R> {
     source: &'a mut R,
-    source_pos: usize,
     source_exhausted: bool,
     buffer: Vec<u8>,
     buffer_offset: usize,
@@ -12,15 +11,14 @@ pub struct SequentialReader<'a, R> {
 }
 
 impl<'a, R: Read> SequentialReader<'a, R> {
-    pub fn new(source: &'a mut R, size: usize) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(source: &'a mut R, size: usize) -> Self {
+        Self {
             source,
-            source_pos: 0,
             source_exhausted: false,
             buffer: vec![0u8; size],
             buffer_offset: 0,
             buffer_filled: 0,
-        })
+        }
     }
 
     pub fn read_exact(&mut self, size: usize) -> io::Result<Option<&mut [u8]>> {
@@ -54,7 +52,6 @@ impl<'a, R: Read> SequentialReader<'a, R> {
                         self.source_exhausted = true;
                     }
                     Ok(n) => {
-                        self.source_pos += n;
                         self.buffer_filled += n;
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -93,7 +90,6 @@ impl<'a, R: Read> SequentialReader<'a, R> {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(n) => {
                     left -= n;
-                    self.source_pos += n;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -101,12 +97,6 @@ impl<'a, R: Read> SequentialReader<'a, R> {
         }
 
         Ok(())
-    }
-
-    pub fn source_position(&self) -> usize {
-        self.source_pos
-            .checked_sub(self.buffer_filled - self.buffer_offset)
-            .unwrap()
     }
 
     pub fn empty(&self) -> bool {
