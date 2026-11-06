@@ -425,7 +425,7 @@ pub fn write_sequential<W: Write>(
     log::info!("Rebuilding in sequential order...");
     let mut bytes_written = 0u64;
     let new_size = index.rebuilt_size();
-    let progress_bar = get_progress_bar(new_size as u64, progress_bar)?;
+    let progress_bar = get_progress_bar(new_size, progress_bar)?;
 
     if let Some(rewrite_uuid) = rewrite_uuid {
         index.bytes[8..24].copy_from_slice(rewrite_uuid.as_bytes());
