@@ -470,17 +470,19 @@ pub fn write_sequential<W: Write>(
             extent_buffer[24..40].copy_from_slice(digest.as_ref());
 
             let mut offset = EXTENT_HEADER_SIZE;
-            for c in clusters[start..end].iter() {
-                let cluster_blocks = c.mask.count_ones();
-                if cluster_blocks == 0 {
-                    continue;
+            let mut stored_clusters = clusters[start..end].iter().filter(|c| c.mask != 0).peekable();
+            while let Some(c) = stored_clusters.next() {
+                let mut read_size = c.mask.count_ones() as usize * BLOCK_SIZE;
+                while let Some(next) = stored_clusters.peek() {
+                    if c.first_block_offset.checked_add(read_size as u64) != Some(next.first_block_offset) {
+                        break;
+                    }
+                    read_size += next.mask.count_ones() as usize * BLOCK_SIZE;
+                    stored_clusters.next();
                 }
 
-                let cluster_size = cluster_blocks as usize * BLOCK_SIZE;
-                let cluster_buffer = &mut extent_buffer[offset..offset + cluster_size];
-                // todo: optimization: we can join reads when blocks are contiguous to reduce the number of syscalls.
-                input.read_exact_at(cluster_buffer, c.first_block_offset)?;
-                offset += cluster_size;
+                input.read_exact_at(&mut extent_buffer[offset..offset + read_size], c.first_block_offset)?;
+                offset += read_size;
             }
 
             assert_eq!(offset, EXTENT_HEADER_SIZE + non_empty_blocks as usize * BLOCK_SIZE);
