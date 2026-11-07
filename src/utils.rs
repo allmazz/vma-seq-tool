@@ -23,13 +23,10 @@ impl<'a, R: Read> SequentialReader<'a, R> {
 
     pub fn read_exact(&mut self, size: usize) -> io::Result<Option<&mut [u8]>> {
         if size > self.buffer.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "Buffer is too small: tried to read {} bytes. Use the --sequential-buffer-size option to make it big enough.",
-                    size
-                ),
-            ));
+            return Err(io::Error::other(format!(
+                "Buffer is too small: tried to read {} bytes. Use the --sequential-buffer-size option to make it big enough.",
+                size
+            )));
         }
 
         assert!(self.buffer_offset <= self.buffer_filled);

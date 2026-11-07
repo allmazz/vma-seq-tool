@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Index { io } => {
             io.check()?;
-            let index = index(&args, &io)?;
+            let index = index(&args, io)?;
             if io.is_stdout() {
                 let mut w = BufWriter::new(io::stdout().lock());
                 index.save(&mut w)?;

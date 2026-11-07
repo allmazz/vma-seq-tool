@@ -117,7 +117,7 @@ impl VMAIndex {
         let blob = &self.bytes[blob_buffer_offset..];
         let devsinfo =
             &self.bytes[HEADER_DEV_INFO_OFFSET..HEADER_DEV_INFO_OFFSET + HEADER_DEV_INFO_LEN * HEADER_DEV_INFO_SIZE];
-        for (i, devinfo) in devsinfo.chunks_exact(HEADER_DEV_INFO_SIZE).enumerate() {
+        for (i, devinfo) in devsinfo.as_chunks::<HEADER_DEV_INFO_SIZE>().0.iter().enumerate() {
             let mut dev = VMAIndexDevInfo {
                 name: "".to_string(),
                 size: BigEndian::read_u64(&devinfo[8..16]),
@@ -209,7 +209,7 @@ impl VMAIndex {
 
         let blocksinfo = &bytes[EXTENT_HEADER_BLOCKINFO_OFFSET
             ..EXTENT_HEADER_BLOCKINFO_OFFSET + EXTENT_HEADER_BLOCKINFO_LEN * EXTENT_HEADER_BLOCKINFO_SIZE];
-        for blockinfo in blocksinfo.chunks_exact(EXTENT_HEADER_BLOCKINFO_SIZE) {
+        for blockinfo in blocksinfo.as_chunks::<EXTENT_HEADER_BLOCKINFO_SIZE>().0 {
             let dev_id = blockinfo[3];
             if dev_id == 0 {
                 continue;
@@ -457,8 +457,7 @@ pub fn write_sequential<W: Write>(
             w.write_all(&non_empty_blocks.to_be_bytes())?;
             w.write_all(&index.bytes[8..24])?;
             w.write_all(&[0u8; 16])?;
-            for i in start..end {
-                let c = &clusters[i];
+            for (i, c) in clusters.iter().enumerate().take(end).skip(start) {
                 w.write_all(&c.mask.to_be_bytes())?;
                 w.write_all(&[0u8])?;
                 w.write_all(&[dev_id as u8])?;
