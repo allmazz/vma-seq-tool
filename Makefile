@@ -1,16 +1,17 @@
 PODMAN_TEST_IMAGE = allmazz/vma-seq-tool-test
 
-.PHONY: test_in_podman build clean
+.PHONY: test test_in_podman build clean
 
 build:
 	cargo build --release
 
-test_in_podman: build
+test:
+	cargo test
+
+test_in_podman:
 	podman build -t $(PODMAN_TEST_IMAGE) ./tests
-	podman run -it --rm -v .:/vma-seq-tool $(PODMAN_TEST_IMAGE) /vma-seq-tool/tests/test.sh \
-		/vma-seq-tool/target/release/vma-seq-tool \
-		/vma-seq-tool/tests/tmp \
-		/vma-seq-tool/tests/samples
+	podman run --rm -v "$(CURDIR):/vma-seq-tool:Z" -w /vma-seq-tool $(PODMAN_TEST_IMAGE) \
+		cargo test --target-dir target/podman
 
 install: build
 	sudo install -Dm755 target/release/vma-seq-tool /usr/bin/vma-seq-tool
