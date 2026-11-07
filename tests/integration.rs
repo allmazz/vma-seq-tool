@@ -140,6 +140,50 @@ fn rebuild_preserves_archive_contents(#[files("tests/samples/*.vma")] sample: Pa
 }
 
 #[rstest]
+#[case::empty(0)]
+#[case::header_without_blob(12288)]
+#[case::truncated_blob(12500)]
+fn rejects_truncated_input(#[case] len: usize) {
+    let temp = workspace("truncated-input-");
+    let dir = temp.path();
+    let sample = fs::read("tests/samples/pve9_2_26-one-disk.vma").unwrap();
+    fs::write(dir.join("truncated.vma"), &sample[..len]).unwrap();
+
+    for flags in FLAGS {
+        for input in ["truncated.vma", "-"] {
+            let mut command = tool(dir, flags);
+            command.args(["index", input, "out"]);
+            if input == "-" {
+                command.stdin(File::open(dir.join("truncated.vma")).unwrap());
+            }
+            let output = run(&mut command);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{command:?}: {stderr}");
+            assert!(!dir.join("out").exists(), "{command:?}: created output on failure");
+        }
+    }
+}
+
+#[test]
+fn accepts_out_of_range_ctime() {
+    let temp = workspace("out-of-range-ctime-");
+    let dir = temp.path();
+    let mut sample = fs::read("tests/samples/pve9_2_26-one-disk.vma").unwrap();
+    let header_size = u32::from_be_bytes(sample[56..60].try_into().unwrap()) as usize;
+    sample[24..32].copy_from_slice(&i64::MAX.to_be_bytes());
+    sample[32..48].fill(0);
+    let digest = md5::compute(&sample[..header_size]);
+    sample[32..48].copy_from_slice(digest.as_ref());
+    fs::write(dir.join("input.vma"), sample).unwrap();
+
+    check(
+        tool(dir, &[])
+            .env("RUST_LOG", "info")
+            .args(["index", "input.vma", "out"]),
+    );
+}
+
+#[rstest]
 #[case::stdin(&["rebuild", "-", "out"], 1, "Input can't be stdin for rebuild")]
 #[case::stdin_with_index_file(&["rebuild", "-i", "index", "-", "out"], 1, "Input can't be stdin for rebuild")]
 #[case::stdin_with_index_stdin(&["rebuild", "-i", "-", "-", "out"], 1, "Input can't be stdin for rebuild")]

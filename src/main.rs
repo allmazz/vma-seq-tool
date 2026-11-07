@@ -119,8 +119,9 @@ fn main() -> anyhow::Result<()> {
             } else {
                 let mut w = BufWriter::new(File::create_new(&io.output)?);
                 index.save(&mut w)?;
-                log::info!("Index saved to {}", io.output.display());
                 w.flush()?;
+                w.get_ref().sync_all()?;
+                log::info!("Index saved to {}", io.output.display());
             }
             Ok(())
         }
@@ -168,7 +169,7 @@ fn rebuild(
 
     let mut file = File::create_new(&io.output)?;
     write_sequential(&mut input, &mut file, &mut idx, rewrite_uuid, args.progress_bar)?;
-    file.flush()?;
+    file.sync_all()?;
     Ok(())
 }
 

@@ -1,4 +1,5 @@
 use crate::utils::{SequentialReader, get_progress_bar};
+use anyhow::Context;
 use bincode::{Decode, Encode, decode_from_std_read, encode_into_std_write};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use chrono::DateTime;
@@ -111,7 +112,8 @@ impl VMAIndex {
         log::info!(
             "Dump {} created at {}",
             Uuid::from_bytes_ref((&self.bytes[8..24]).try_into()?),
-            DateTime::from_timestamp(ctime as i64, 0).unwrap()
+            DateTime::from_timestamp(ctime as i64, 0)
+                .map_or_else(|| format!("invalid timestamp {ctime}"), |t| t.to_string())
         );
 
         let blob = &self.bytes[blob_buffer_offset..];
@@ -318,14 +320,14 @@ impl VMAIndex {
         ignore_limits: bool,
     ) -> anyhow::Result<Self> {
         let mut h = Self {
-            bytes: Vec::from(reader.read_exact(HEADER_SIZE)?.expect("Input is too short")),
+            bytes: Vec::from(reader.read_exact(HEADER_SIZE)?.context("Input is too short")?),
             ..Default::default()
         };
         let blob_buffer_offset = h.parse(ignore_limits)?;
 
         let blob_size = h.bytes.len() - HEADER_SIZE;
 
-        h.bytes[HEADER_SIZE..].copy_from_slice(reader.read_exact(blob_size)?.expect("Input is too short"));
+        h.bytes[HEADER_SIZE..].copy_from_slice(reader.read_exact(blob_size)?.context("Input is too short")?);
         h.verify_checksum()?;
         h.parse_devs(blob_buffer_offset, ignore_limits)?;
 
