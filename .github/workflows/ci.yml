@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  RUSTUP_TOOLCHAIN: 1.99.1
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          components: rustfmt, clippy
+          targets: ${{ env.TARGET }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ env.TARGET }}
+          save-if: ${{ github.event_name == 'push' }}
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --target "$TARGET" --all-targets -- -D warnings
+
+  unit:
+    name: Unit tests (${{ matrix.arch }})
+    needs: lint
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix: &platforms
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.event_name == 'push' }}
+      - run: cargo test --locked --target "$TARGET" --bin vma-seq-tool
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: unit
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix: *platforms
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Build release binary and integration test harness
+        run: |
+          cargo test --locked --release --target "$TARGET" --test integration --no-run --message-format=json > target/integration-build.jsonl
+          test_binary=$(jq -er 'select(.reason == "compiler-artifact" and .target.name == "integration") | .executable // empty' target/integration-build.jsonl)
+          cp "$test_binary" integration-tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: integration-tests-linux-${{ matrix.arch }}
+          path: integration-tests
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify static binary
+        run: |
+          readelf --program-headers --dynamic "target/$TARGET/release/vma-seq-tool" > target/elf.txt
+          if grep -Eq 'INTERP|\(NEEDED\)' target/elf.txt; then
+            echo 'Release binary is not statically linked' >&2
+            exit 1
+          fi
+      - name: Name binary
+        run: mv "target/$TARGET/release/vma-seq-tool" "vma-seq-tool-$TARGET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: vma-seq-tool-${{ matrix.target }}
+          path: vma-seq-tool-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    name: Integration tests (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: *platforms
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: vma-seq-tool-${{ matrix.target }}
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: integration-tests-linux-${{ matrix.arch }}
+          path: dist
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build integration environment
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: tests
+          file: tests/Dockerfile.ci
+          platforms: linux/${{ matrix.arch }}
+          tags: vma-seq-tool-test:ci
+          load: true
+          cache-from: type=gha,scope=vma-integration-${{ matrix.arch }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,scope=vma-integration-{0},mode=max', matrix.arch) || '' }}
+      - name: Run integration tests with vma
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          install -Dm755 "dist/vma-seq-tool-$TARGET" "target/$TARGET/release/vma-seq-tool"
+          chmod +x dist/integration-tests
+          docker run --rm \
+            --platform "linux/$ARCH" \
+            --user "$(id -u):$(id -g)" \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            --workdir "$GITHUB_WORKSPACE" \
+            vma-seq-tool-test:ci ./dist/integration-tests
+
+  release:
+    name: Release
+    needs: integration
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: vma-seq-tool-*-unknown-linux-musl
+          merge-multiple: true
+          path: dist
+      - name: Publish binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          test -s dist/vma-seq-tool-x86_64-unknown-linux-musl
+          test -s dist/vma-seq-tool-aarch64-unknown-linux-musl
+          chmod +x dist/vma-seq-tool-x86_64-unknown-linux-musl dist/vma-seq-tool-aarch64-unknown-linux-musl
+          gh release create "$TAG" \
+            dist/vma-seq-tool-x86_64-unknown-linux-musl dist/vma-seq-tool-aarch64-unknown-linux-musl \
+            --verify-tag --generate-notes --title "$TAG"
