@@ -96,6 +96,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' }}
       - name: Build release binary and integration test harness
         run: |
+          mkdir -p target
           cargo test --locked --release --target "$TARGET" --test integration --no-run --message-format=json > target/integration-build.jsonl
           test_binary=$(jq -er 'select(.reason == "compiler-artifact" and .target.name == "integration") | .executable // empty' target/integration-build.jsonl)
           cp "$test_binary" integration-tests
